@@ -1,24 +1,30 @@
-import os
 import re
-import io
 import requests
 import zipfile
-import tarfile 
+import tarfile
+from pathlib import Path
 from tqdm import tqdm
 
-def download_file(url, path):
+def download_file(url: str, path: Path):
     resp = requests.get(url, stream=True)
-    resp.raise_for_status()
-    
-    if 'content-disposition' in resp.headers.keys():
-        name = re.search('filename=(.+)', resp.headers['content-disposition']).group()
+
+    content_disp = resp.headers['content-disposition']
+
+    if content_disp:
+        pattern = 'filename='
+        index = content_disp.find(pattern)
+
+        if index > -1:
+            name = content_disp[index+len(pattern):]
+        else:
+            name = url.split('/')[-1]
     else:
         name = url.split('/')[-1]
 
-    dest = os.path.join(path, name)
+    dest = path.joinpath(name)
 
     tqdm_args = {
-        'desc': path,
+        'desc': name,
         'total': int(resp.headers.get('content-length', 0)),
         'unit': 'iB',
         'unit_scale': True,
@@ -34,29 +40,74 @@ def download_file(url, path):
 
 class Dataset():
     @staticmethod
-    def _parallel_dataset(path):
+    def _parallel_dataset(path: Path):
         url = 'https://codeload.github.com/prasastoadi/parallel-corpora-en-id/zip/refs/heads/master'
         dest = download_file(url, path)
 
-        with zipfile.ZipFile(dest) as zf:
+        with zipfile.ZipFile(dest, 'r') as zf:
             for f in zf.namelist():
                 if f.endswith('.tgz'):
-                    content = io.BytesIO(zf.read(f))
 
-                    with tarfile.open(fileobj=content) as tf:
+                    with zf.open(f, 'r') as fo, tarfile.open(fileobj=fo, mode='r') as tf:
                         for m in tf.getmembers():
                             if m.name.endswith('.en') or '-EN-' in m.name:
-                                tf.extract(m, path=os.path.join(path, 'parallel-dataset/en'))
+                                tf.extract(m, path=path.joinpath('parallel-dataset/en'))
                             else:
-                                tf.extract(m, path=os.path.join(path, 'parallel-dataset/id'))
+                                tf.extract(m, path=path.joinpath('parallel-dataset/id'))
 
-        os.remove(dest)
+        dest.unlink()
+        
+    @staticmethod
+    def _bilingual_dataset(path: Path):
+        url = 'https://github.com/desmond86/Indonesian-English-Bilingual-Corpus/archive/refs/heads/master.zip'
+        dest = download_file(url, path)
+
+        with zipfile.ZipFile(dest, 'r') as zf:
+            for f in zf.namelist():
+                if f.endswith('.en'):
+                    zf.extract(f, path.joinpath('bilingual/en'))
+                elif f.endswith('.id'):
+                    zf.extract(f, path.joinpath('bilingual/id'))
+
+        dest.unlink()
+        
+    @staticmethod
+    def _talpco_dataset(path: Path):
+        url = 'https://github.com/matbahasa/TALPCo/archive/refs/heads/master.zip'
+        dest = download_file(url, path)
+
+        path_en = path.joinpath('talpco/en')
+        path_id = path.joinpath('talpco/id')
+
+        path_en.mkdir(parents=True, exist_ok=True)
+        path_id.mkdir(exist_ok=True)
+
+        file_to_path = [
+            ('data_eng.txt', path_en),
+            ('data_ind.txt', path_id)
+        ]
+
+        with zipfile.ZipFile(dest, 'r') as zf:
+            for f in zf.namelist():
+                for fn, p in file_to_path:
+                    if f.endswith(fn):
+                        
+                        with zf.open(f, 'r') as fo, open(p.joinpath(fn), 'w') as t:
+                            for l in fo.readlines():
+                                item = l.split(b'\t')
+
+                                if len(item) > 1:
+                                    t.write(item[1])
+                            
+        dest.unlink()
         
     @staticmethod
     def download_all(path='data'):
-        if not os.path.isdir(path):
-            os.mkdir(path)
+        path = Path(path)
+        path.mkdir(exist_ok=True)
         
         Dataset._parallel_dataset(path)
+        Dataset._bilingual_dataset(path)
+        Dataset._talpco_dataset(path)
 
 
