@@ -68,4 +68,19 @@ def train_model(model):
                 learning rate: {learning_rate}',
             )
             total_loss = 0
-            
+
+def evaluate(model, eval_data): 
+    model.eval()
+    total_loss = 0
+    source_mask = generate_square_subsequent_mask(bptt).to(device)
+
+    with torch.no_grad():
+        for i in range(0, eval_data.size(0) - 1, bptt):
+            data, targets = get_batch(eval_data, i)
+            batch_size = data.size(0)
+            if batch_size != bptt:
+                source_mask = source_mask[:batch_size, :batch_size]
+            output = model(data, source_mask)
+            output_flat = output.view(-1, token)
+            total_loss += batch_size * cross_entropy_loss(output_flat, targets)
+    return total_loss / (len(eval_data) - 1)
