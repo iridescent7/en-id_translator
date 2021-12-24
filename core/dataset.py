@@ -1,11 +1,12 @@
 import requests
 import zipfile
 import tarfile
-import pickle
+import spacy
+import os
+
 from pathlib import Path
 from tqdm import tqdm
 from munch import Munch
-from nltk import sent_tokenize, word_tokenize
 from collections import Counter
 
 def download_file(url: str, path: Path):
@@ -43,7 +44,7 @@ def download_file(url: str, path: Path):
 
 class Dataset():
     @staticmethod
-    def _parallel_dataset(path: Path):
+    def _parallel_dataset(path: Path, prefix: str='parallel'):
         url = 'https://codeload.github.com/prasastoadi/parallel-corpora-en-id/zip/refs/heads/master'
         dest = download_file(url, path)
 
@@ -54,33 +55,38 @@ class Dataset():
                     with zf.open(f, 'r') as fo, tarfile.open(fileobj=fo, mode='r') as tf:
                         for m in tf.getmembers():
                             if m.name.endswith('.en') or '-EN-' in m.name:
-                                tf.extract(m, path=path / 'parallel-dataset/en')
+                                tf.extract(m, path=path / prefix /'en')
                             else:
-                                tf.extract(m, path=path / 'parallel-dataset/id')
+                                tf.extract(m, path=path / prefix / 'id')
 
         dest.unlink()
         
     @staticmethod
-    def _bilingual_dataset(path: Path):
+    def _bilingual_dataset(path: Path, prefix: str='bilingual'):
         url = 'https://github.com/desmond86/Indonesian-English-Bilingual-Corpus/archive/refs/heads/master.zip'
         dest = download_file(url, path)
 
         with zipfile.ZipFile(dest, 'r') as zf:
             for f in zf.namelist():
-                if f.endswith('.en'):
-                    zf.extract(f, path / 'bilingual/en')
-                elif f.endswith('.id'):
-                    zf.extract(f, path / 'bilingual/id')
+                en = f.endswith('.en')
+                id = f.endswith('.id')
+
+                if en or id:
+                    dest_path = path / prefix / ('en' if en else 'id')
+                    dest_path.mkdir(parents=True, exist_ok=True)
+
+                    with zf.open(f, 'r') as fo, open(dest_path / os.path.basename(f), 'wb') as t:
+                        t.write(fo.read())
 
         dest.unlink()
         
     @staticmethod
-    def _talpco_dataset(path: Path):
+    def _talpco_dataset(path: Path, prefix: str='talpco'):
         url = 'https://github.com/matbahasa/TALPCo/archive/refs/heads/master.zip'
         dest = download_file(url, path)
 
-        path_en = path / 'talpco/en'
-        path_id = path / 'talpco/id'
+        path_en = path / prefix / 'en'
+        path_id = path / prefix / 'id'
 
         path_en.mkdir(parents=True, exist_ok=True)
         path_id.mkdir(exist_ok=True)
@@ -101,14 +107,14 @@ class Dataset():
                                 split = line.decode('UTF-8').split('\t')
                 
                                 if len(split) > 1:
-                                    items.append(split[1])
+                                    items.append(split[1].replace('\r', ''))
                             
-                            t.write('\n'.join(items))
+                            t.writelines(items)
                             
         dest.unlink()
         
     @staticmethod
-    def download_all(path: str='raw_data'):
+    def download_all(path: str='data'):
         path = Path(path)
         path.mkdir(exist_ok=True)
         
@@ -117,74 +123,45 @@ class Dataset():
         Dataset._talpco_dataset(path)
 
     @staticmethod
-    def build_dataset(path: str='raw_data', new_path: str='data', langs: list=['en', 'id']):
+    def load_dataset(path: str='data', langs: list=['en', 'id'], init_vocab: list[str]=[]):
         path = Path(path)
 
         if not path.exists():
             raise RuntimeError('No data is found, please download dataset first')
 
-        new_path = Path(new_path)
-        new_path.mkdir(exist_ok=True)
-
-        dataset = dict()
+        dataset = Munch(data=dict(), langs=langs)
 
         for lang in langs:
-            dataset[lang] = []
-
-            data_path = new_path / (lang + '.txt')
-            vocab_path = new_path / (lang + '_vocab.txt')
-            encoded_path = new_path / (lang + '_encoded.bin')
-
-            print(f'[{lang}] Reading all data into memory...')
-
+            sentences = []
             for name in path.iterdir():
-                with open(data_path, 'w', encoding='UTF-8') as df, \
-                     open(vocab_path, 'w', encoding='UTF-8') as vf:
+                for d in (name / lang).iterdir():
+                    if d.is_file():
+                        with open(d, 'r', encoding='UTF-8') as file:
+                            # All sentences are already separated by a newline
+                            for line in file.readlines():
+                                sentences.append(line.lower().rstrip('\n'))
 
-                    lang_path = name / lang
-                    dirs = [dir for dir in lang_path.iterdir()]
+            # try to load spacy pretrained language model if supported
+            try:
+                tokenizer = spacy.load(lang)
+            except:
+                tokenizer = spacy.blank(lang)
 
-                    for dir in dirs:
-                        if dir.is_file():
-                            with open(dir, 'r', encoding='UTF-8') as f:
-                                dataset[lang].append(f.read())
-
-            print(f'[{lang}] Tokenizing data...')
-            vocab_counter = Counter(['<bos>', '<eos>'])
-            
-            sents = sent_tokenize('\n'.join(dataset[lang]))
+            vocab_counter = Counter(init_vocab)
             sent_words = []
 
-            for sent in sents:
-                words = word_tokenize(sent)
+            for sent in tqdm(sentences, f'Tokenizing data ({lang})'):
+                words = tokenizer(sent)
 
                 sent_words.append(words)
                 vocab_counter.update(words)
-            
-            print(f'[{lang}] Building input features...')
-            vocab_count = len(vocab_counter)
 
-            vocab_idx = vocab_counter
-            vocab_encoded = dict()
+            vocab = dict(zip(vocab_counter.keys(), range(len(vocab_counter))))
 
-            for i, k in enumerate(vocab_idx.keys()):
-                onehot = [0] * vocab_count
-                onehot[i] = 1
+            # sent_tokens = []
+            # for sw in sent_words:
+            #     sent_tokens.append([vocab[w] if w in vocab.keys() else vocab['<unk>'] for w in sw])
 
-                vocab_idx[k] = i
-                vocab_encoded[k] = onehot
+            dataset.data[lang] = Munch(vocab=vocab, sent=sentences, sent_tokens=sent_words, tokenizer=tokenizer)
 
-            BOS_IDX = vocab_encoded['<bos>']
-            EOS_IDX = vocab_encoded['<eos>']
-
-            features = []
-            for sw in sent_words:
-                features.append([vocab_encoded[BOS_IDX]] + [vocab_encoded[w] for w in sw] + [vocab_encoded[EOS_IDX]])
-
-            print(f'[{lang}] Saving to disk...')
-
-            with open(encoded_path, 'wb') as f:
-                pickle.dump(f, features)
-
-            df.write('\n'.join(sents))
-            vf.write('\n'.join(vocab_counter.keys()))
+        return dataset

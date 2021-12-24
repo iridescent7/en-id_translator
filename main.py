@@ -7,12 +7,14 @@ from core.dataset import Dataset
 def main(args):
     try:
         if args.download_data:
-            print('Downloading datasets...')
+            print('Downloading dataset...')
             Dataset.download_all()
             print()
 
+        # TODO: kita main nya di ipynb aja kli ya
+        # di ipynb juga bisa import .py
         if args.build_data:
-            print('Building datasets...')
+            print('Building dataset...')
             Dataset.build_dataset()
             print()
             
