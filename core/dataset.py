@@ -1,8 +1,9 @@
 import requests
 import zipfile
 import tarfile
-import spacy
 import os
+import spacy
+import numpy as np
 
 from pathlib import Path
 from tqdm import tqdm
@@ -114,54 +115,117 @@ class Dataset():
         dest.unlink()
         
     @staticmethod
-    def download_all(path: str='data'):
+    def download_all(path: str='raw_data'):
         path = Path(path)
         path.mkdir(exist_ok=True)
         
+        print('Downloading data')
+
         Dataset._parallel_dataset(path)
         Dataset._bilingual_dataset(path)
         Dataset._talpco_dataset(path)
 
-    @staticmethod
-    def load_dataset(path: str='data', langs: list=['en', 'id'], init_vocab: list[str]=[]):
-        path = Path(path)
+        print('Finished downloading')
 
-        if not path.exists():
+    @staticmethod
+    def build_dataset(path: str='data',
+                      data_path: str='raw_data',
+                      langs: list[str]=['en', 'id'],
+                      test_size: float=0.2,
+                      random_state: int=42):
+        path = Path(path)        
+        data_path = Path(data_path)
+
+        if not data_path.exists():
             raise RuntimeError('No data is found, please download dataset first')
 
-        dataset = Munch(data=dict(), langs=langs)
+        path.mkdir(exist_ok=True)
+
+        data = dict()
+        last_len = -1
+
+        print('Building dataset')
 
         for lang in langs:
-            sentences = []
-            for name in path.iterdir():
+            sent = []
+            
+            for name in data_path.iterdir():
                 for d in (name / lang).iterdir():
                     if d.is_file():
                         with open(d, 'r', encoding='UTF-8') as file:
                             # All sentences are already separated by a newline
                             for line in file.readlines():
-                                sentences.append(line.lower().rstrip('\n'))
+                                sent.append(line.lower())
 
-            # try to load spacy pretrained language model if supported
+            data[lang] = np.array(sent)
+
+            if last_len == -1:
+                last_len = len(sent)
+            elif last_len != len(sent):
+                raise RuntimeError('Data length of sentence mismatch ({} -> {} ({}))'.format(last_len, len(sent), lang))
+
+
+        state = np.random.get_state()
+        np.random.seed(random_state)
+
+        msk = np.random.rand(last_len) > test_size
+        np.random.set_state(state)
+        
+        for lang in langs:
+            with open(path / (lang + '_train.txt'), 'w', encoding='UTF-8') as file:
+                file.writelines(data[lang][msk])
+                
+            with open(path / (lang + '_test.txt'), 'w', encoding='UTF-8') as file:
+                file.writelines(data[lang][~msk])
+    
+        print('Finished building dataset')
+
+    @staticmethod
+    def load_dataset(path: str='data',
+                      src_lang: str='en',
+                      tgt_lang: str='id'):
+        path = Path(path)
+
+        if not path.exists():
+            raise RuntimeError('No data is found, please download and/or build dataset first')
+
+        data = dict()
+        vocab = dict()
+        tokenizer = dict()
+
+        for lang in [src_lang, tgt_lang]:
             try:
-                tokenizer = spacy.load(lang)
+                tokenizer[lang] = spacy.load(lang)
             except:
-                tokenizer = spacy.blank(lang)
+                tokenizer[lang] = spacy.blank(lang)
 
-            vocab_counter = Counter(init_vocab)
-            sent_words = []
+        for type in ['train', 'test']:
+            data[type] = dict()
 
-            for sent in tqdm(sentences, f'Tokenizing data ({lang})'):
-                words = tokenizer(sent)
+            for lang in [src_lang, tgt_lang]:
+                sent = []
 
-                sent_words.append(words)
-                vocab_counter.update(words)
+                with open(path / (lang + '_' + type + '.txt'), 'r', encoding='UTF-8') as file:
+                    for line in file.readlines():
+                        sent.append(line.lower().rstrip('\n'))
 
-            vocab = dict(zip(vocab_counter.keys(), range(len(vocab_counter))))
+                sent_tokens = []
 
-            # sent_tokens = []
-            # for sw in sent_words:
-            #     sent_tokens.append([vocab[w] if w in vocab.keys() else vocab['<unk>'] for w in sw])
+                for sent in tqdm(sent, f'Tokenizing data ({type}/{lang})'):
+                    sent_tokens.append(tokenizer[lang](sent))
 
-            dataset.data[lang] = Munch(vocab=vocab, sent=sentences, sent_tokens=sent_words, tokenizer=tokenizer)
+                if type == 'train':
+                    vocab_counter = Counter(['<unk>', '<pad>', '<sos>', '<eos>'])
+                    vocab_counter.update(sent_tokens)
 
-        return dataset
+                    vocab[lang] = dict(zip(vocab_counter.keys(), range(len(vocab_counter))))
+
+                token_ids = []
+                for sent_tok in sent_tokens:
+                    token_ids.append([vocab[lang]['<sos>']] +
+                                     [vocab[lang][tok] if tok in vocab[lang].keys() else vocab[lang]['<unk>'] for tok in sent_tok] +
+                                     [vocab[lang]['<eos>']])
+
+                data[type][lang] = Munch(vocab=vocab, token_ids=token_ids, tokenizer=tokenizer)
+
+        return data
